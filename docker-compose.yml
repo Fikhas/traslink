@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: traslink
+      POSTGRES_USER: traslink
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-traslink}
+    volumes:
+      - traslink_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U traslink"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://traslink:${POSTGRES_PASSWORD:-traslink}@postgres:5432/traslink
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      NEXT_PUBLIC_MAP_STYLE_URL: ${NEXT_PUBLIC_MAP_STYLE_URL:-https://tiles.openfreemap.org/styles/liberty}
+      GPS_INGEST_API_KEY: ${GPS_INGEST_API_KEY:?GPS_INGEST_API_KEY wajib diisi}
+    ports:
+      - "3000:3000"
+  migrate:
+    build:
+      context: .
+      target: migrator
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://traslink:${POSTGRES_PASSWORD:-traslink}@postgres:5432/traslink
+volumes:
+  traslink_postgres:
