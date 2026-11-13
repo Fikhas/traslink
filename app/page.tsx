@@ -1,26 +1,30 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
+  AlertCircle,
   ArrowLeftRight,
   BusFront,
   Check,
   ChevronDown,
   Clock3,
   Edit3,
+  Flag,
   Gauge,
   LayoutDashboard,
-  LocateFixed,
+  LogIn,
   LogOut,
   Map as MapIcon,
   MapPin,
   Menu,
   MoreHorizontal,
+  MousePointer2,
   Navigation,
   Phone,
   Plus,
   Radio,
+  RotateCcw,
   Route,
   Search,
   ShieldCheck,
@@ -32,8 +36,20 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from '@/components/ui/input-group';
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+} from '@/components/ui/pagination';
 import ProductionMap from '@/components/production-map';
 import type { RoutePoint } from '@/db/schema';
+import { distanceToRoute } from '@/lib/geo';
 
 type View = 'passenger' | 'driver' | 'admin';
 type AdminTab = 'overview' | 'routes' | 'vehicles' | 'gps';
@@ -49,6 +65,7 @@ type AppRoute = {
   color: string;
   operatingStart?: string;
   operatingEnd?: string;
+  updatedAt?: string;
   fare?: number;
   active: boolean;
   activeVehicles?: number;
@@ -56,89 +73,12 @@ type AppRoute = {
   pathA: RoutePoint[];
   pathB: RoutePoint[];
 };
-const routes: AppRoute[] = [
-  {
-    code: '05',
-    name: 'Cicaheum — Ciroyom',
-    origin: 'Cicaheum',
-    destination: 'Ciroyom',
-    via: 'Jl. Ahmad Yani',
-    stops: 14,
-    color: '#ff5a47',
-    active: true,
-    fleet: 12,
-    pathA: [
-      { lng: 107.6595, lat: -6.9057 },
-      { lng: 107.6468, lat: -6.9092 },
-      { lng: 107.6317, lat: -6.9128 },
-      { lng: 107.6148, lat: -6.9175 },
-      { lng: 107.5958, lat: -6.9198 },
-      { lng: 107.5758, lat: -6.9147 },
-    ],
-    pathB: [
-      { lng: 107.5758, lat: -6.9147 },
-      { lng: 107.5958, lat: -6.9198 },
-      { lng: 107.6148, lat: -6.9175 },
-      { lng: 107.6317, lat: -6.9128 },
-      { lng: 107.6468, lat: -6.9092 },
-      { lng: 107.6595, lat: -6.9057 },
-    ],
-  },
-  {
-    code: '03',
-    name: 'Sadang Serang — Caringin',
-    origin: 'Sadang Serang',
-    destination: 'Caringin',
-    via: 'Jl. Dipatiukur',
-    stops: 11,
-    color: '#2970ff',
-    active: true,
-    fleet: 9,
-    pathA: [
-      { lng: 107.6258, lat: -6.8853 },
-      { lng: 107.6177, lat: -6.8956 },
-      { lng: 107.6096, lat: -6.9068 },
-      { lng: 107.6012, lat: -6.9194 },
-      { lng: 107.5894, lat: -6.9368 },
-      { lng: 107.5801, lat: -6.9455 },
-    ],
-    pathB: [
-      { lng: 107.5801, lat: -6.9455 },
-      { lng: 107.5894, lat: -6.9368 },
-      { lng: 107.6012, lat: -6.9194 },
-      { lng: 107.6096, lat: -6.9068 },
-      { lng: 107.6177, lat: -6.8956 },
-      { lng: 107.6258, lat: -6.8853 },
-    ],
-  },
-  {
-    code: '10',
-    name: 'Cicadas — Elang',
-    origin: 'Cicadas',
-    destination: 'Elang',
-    via: 'Jl. Asia Afrika',
-    stops: 16,
-    color: '#e9a319',
-    active: true,
-    fleet: 15,
-    pathA: [
-      { lng: 107.6452, lat: -6.9148 },
-      { lng: 107.6301, lat: -6.9186 },
-      { lng: 107.6139, lat: -6.9214 },
-      { lng: 107.5972, lat: -6.9224 },
-      { lng: 107.5797, lat: -6.9178 },
-      { lng: 107.5662, lat: -6.9103 },
-    ],
-    pathB: [
-      { lng: 107.5662, lat: -6.9103 },
-      { lng: 107.5797, lat: -6.9178 },
-      { lng: 107.5972, lat: -6.9224 },
-      { lng: 107.6139, lat: -6.9214 },
-      { lng: 107.6301, lat: -6.9186 },
-      { lng: 107.6452, lat: -6.9148 },
-    ],
-  },
-];
+type LocationSearchResult = RoutePoint & {
+  id: string;
+  name: string;
+  type: string;
+};
+type MapFocusPoint = RoutePoint & { id: number; label: string };
 
 function normalizeDatabaseRoutes(data: unknown): AppRoute[] {
   if (!Array.isArray(data)) return [];
@@ -147,6 +87,8 @@ function normalizeDatabaseRoutes(data: unknown): AppRoute[] {
     stops: route.stops ?? 0,
     active: route.active ?? 0,
     fleet: route.fleet ?? 0,
+    pathA: Array.isArray(route.pathA) ? route.pathA : [],
+    pathB: Array.isArray(route.pathB) ? route.pathB : [],
   }));
 }
 
@@ -161,6 +103,14 @@ async function fetchDatabaseRoutes() {
     );
   }
   return normalizeDatabaseRoutes(data?.routes);
+}
+
+const ROUTES_UPDATED_EVENT = 'traslink:routes-updated';
+const ROUTES_PER_PAGE = 5;
+
+function announceRoutesUpdated() {
+  window.dispatchEvent(new Event(ROUTES_UPDATED_EVENT));
+  localStorage.setItem(ROUTES_UPDATED_EVENT, String(Date.now()));
 }
 
 type VehicleStatus = 'ACTIVE' | 'RESTING' | 'MAINTENANCE' | 'INACTIVE';
@@ -178,6 +128,7 @@ type VehicleRecord = {
   latitude: number | null;
   longitude: number | null;
   recordedAt: string | null;
+  locationFresh: boolean;
 };
 type DriverRecord = { id: string; name: string; email: string };
 type GpsRecord = {
@@ -190,12 +141,6 @@ type GpsRecord = {
   vehicleId: string | null;
   plateNumber: string | null;
 };
-
-const vehiclePins = [
-  { id: 'D 1924 UA', x: 36, y: 29, eta: '3 mnt' },
-  { id: 'D 1842 UB', x: 58, y: 51, eta: '7 mnt' },
-  { id: 'D 1721 UC', x: 77, y: 68, eta: '11 mnt' },
-];
 
 function Logo({ compact = false }: { compact?: boolean }) {
   return (
@@ -216,52 +161,45 @@ function Logo({ compact = false }: { compact?: boolean }) {
 }
 
 function MapCanvas({
-  routeIndex = 0,
   routeData,
-  driver = false,
+  vehicles = [],
+  pickups = [],
   editor = false,
   direction = 'A',
   onPathChange,
+  focusPoint,
 }: {
-  routeIndex?: number;
   routeData?: AppRoute;
-  driver?: boolean;
+  vehicles?: Array<{
+    id: string;
+    label?: string;
+    latitude: number;
+    longitude: number;
+  }>;
+  pickups?: Array<{
+    id: string;
+    label: string;
+    latitude: number;
+    longitude: number;
+  }>;
   editor?: boolean;
   direction?: 'A' | 'B';
   onPathChange?: (p: RoutePoint[]) => void;
+  focusPoint?: MapFocusPoint | null;
 }) {
-  const route = routeData ?? routes[routeIndex];
-  const v = vehiclePins.map((pin, i) => ({
-    id: pin.id,
-    label: pin.eta,
-    longitude: route.pathA[Math.min(i + 1, route.pathA.length - 1)].lng,
-    latitude: route.pathA[Math.min(i + 1, route.pathA.length - 1)].lat,
-  }));
-  const p = driver
-    ? [
-        {
-          id: 'p1',
-          label: 'Nadia · 120 m',
-          longitude: 107.6218,
-          latitude: -6.9155,
-        },
-        {
-          id: 'p2',
-          label: 'Bima · 650 m',
-          longitude: 107.6048,
-          latitude: -6.9211,
-        },
-      ]
-    : [];
+  const pathA = Array.isArray(routeData?.pathA) ? routeData.pathA : [];
+  const pathB = Array.isArray(routeData?.pathB) ? routeData.pathB : [];
   return (
     <div className="absolute inset-0 overflow-hidden bg-[#e8eee9]">
       <ProductionMap
-        path={direction === 'A' ? route.pathA : route.pathB}
-        color={route.color}
-        vehicles={editor ? [] : v}
-        pickups={p}
+        path={direction === 'A' ? pathA : pathB}
+        color={routeData?.color ?? '#ff5a47'}
+        vehicles={editor ? [] : vehicles}
+        pickups={pickups}
         editable={editor}
         onPathChange={onPathChange}
+        fitKey={`${routeData?.id ?? 'empty'}-${direction}-${editor ? 'editor' : (routeData?.updatedAt ?? 'current')}`}
+        focusPoint={focusPoint}
       />
     </div>
   );
@@ -271,10 +209,14 @@ function TopNav({
   view,
   setView,
   allowedViews,
+  authenticated = true,
+  onAdminLogin,
 }: {
   view: View;
   setView: (v: View) => void;
   allowedViews: View[];
+  authenticated?: boolean;
+  onAdminLogin?: () => void;
 }) {
   return (
     <header className="absolute inset-x-0 top-0 z-40 flex items-center justify-between px-4 py-4 md:px-7">
@@ -282,38 +224,52 @@ function TopNav({
         <Logo />
       </div>
       <div className="flex gap-2">
-        <nav className="flex items-center gap-1 rounded-xl border border-white/70 bg-white/90 p-1 shadow-map backdrop-blur-xl">
-          {(
-            [
-              ['passenger', 'Penumpang'],
-              ['driver', 'Supir'],
-              ['admin', 'Admin'],
-            ] as const
-          )
-            .filter(([key]) => allowedViews.includes(key))
-            .map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setView(key)}
-                className={`rounded-lg px-3 py-2 text-xs font-semibold transition md:px-4 ${view === key ? 'bg-ink text-white' : 'text-slate-600 hover:bg-slate-100'}`}
-              >
-                {label}
-              </button>
-            ))}
-        </nav>
-        <Button
-          onClick={() =>
-            fetch('/api/auth/logout', { method: 'POST' }).then(() =>
-              location.reload(),
+        {allowedViews.length > 1 && (
+          <nav className="flex items-center gap-1 rounded-xl border border-white/70 bg-white/90 p-1 shadow-map backdrop-blur-xl">
+            {(
+              [
+                ['passenger', 'Penumpang'],
+                ['driver', 'Supir'],
+                ['admin', 'Admin'],
+              ] as const
             )
-          }
-          variant="outline"
-          size="icon-lg"
-          className="rounded-xl border-white bg-white shadow-map"
-          aria-label="Keluar"
-        >
-          <LogOut />
-        </Button>
+              .filter(([key]) => allowedViews.includes(key))
+              .map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setView(key)}
+                  className={`rounded-lg px-3 py-2 text-xs font-semibold transition md:px-4 ${view === key ? 'bg-ink text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                >
+                  {label}
+                </button>
+              ))}
+          </nav>
+        )}
+        {authenticated ? (
+          <Button
+            onClick={() =>
+              fetch('/api/auth/logout', { method: 'POST' }).then(() =>
+                location.reload(),
+              )
+            }
+            variant="outline"
+            size="icon-lg"
+            className="rounded-xl border-white bg-white shadow-map"
+            aria-label="Keluar"
+          >
+            <LogOut />
+          </Button>
+        ) : (
+          <Button
+            onClick={onAdminLogin}
+            variant="outline"
+            className="h-11 rounded-xl border-white bg-white px-3 text-xs font-bold shadow-map"
+          >
+            <LogIn />
+            <span className="hidden sm:inline">Masuk Petugas</span>
+            <span className="sm:hidden">Masuk</span>
+          </Button>
+        )}
       </div>
     </header>
   );
@@ -322,36 +278,138 @@ function TopNav({
 function PassengerView({
   setView,
   allowedViews,
+  authenticated = true,
+  onAdminLogin,
 }: {
   setView: (v: View) => void;
   allowedViews: View[];
+  authenticated?: boolean;
+  onAdminLogin?: () => void;
 }) {
-  const [routeList, setRouteList] = useState(routes);
+  const [routeList, setRouteList] = useState<AppRoute[]>([]);
+  const [vehicles, setVehicles] = useState<VehicleRecord[]>([]);
+  const [routesReady, setRoutesReady] = useState(false);
+  const [routesError, setRoutesError] = useState('');
   const [routeIndex, setRouteIndex] = useState(0);
   const [direction, setDirection] = useState<'A' | 'B'>('A');
   const [pickup, setPickup] = useState<{ id: string } | null>(null);
+  const [requestingPickup, setRequestingPickup] = useState(false);
   const [nearRoute, setNearRoute] = useState(true);
   const [open, setOpen] = useState(false);
   const [message, setMessage] = useState('');
-  const route = routeList[routeIndex] ?? routes[0];
+  const selectedRouteCodeRef = useRef('');
+  const route = routeList[routeIndex] ?? null;
+  const selectedPath = route
+    ? direction === 'A'
+      ? route.pathA
+      : route.pathB
+    : [];
+  const hasUsablePath = Array.isArray(selectedPath) && selectedPath.length >= 2;
+  const assignedActiveVehicles = vehicles.filter(
+    (vehicle) => vehicle.routeId === route?.id && vehicle.status === 'ACTIVE',
+  );
+  const vehicleLocations = assignedActiveVehicles.flatMap((vehicle) =>
+    vehicle.locationFresh &&
+    vehicle.latitude != null &&
+    vehicle.longitude != null &&
+    distanceToRoute({ lat: vehicle.latitude, lng: vehicle.longitude }, [
+      ...(route?.pathA ?? []),
+      ...(route?.pathB ?? []),
+    ]) <= 1000
+      ? [
+          {
+            id: vehicle.id,
+            label: vehicle.plateNumber,
+            latitude: vehicle.latitude,
+            longitude: vehicle.longitude,
+          },
+        ]
+      : [],
+  );
   useEffect(() => {
-    fetch('/api/routes')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data?.routes?.length)
-          setRouteList(
-            data.routes.map((r: AppRoute) => ({
-              ...r,
-              stops: r.stops ?? 0,
-              active: r.active ?? 0,
-              fleet: r.fleet ?? 0,
-            })),
+    let active = true;
+    const requestedCode = new URLSearchParams(window.location.search).get(
+      'route',
+    );
+    selectedRouteCodeRef.current =
+      requestedCode || localStorage.getItem('traslink:selected-route') || '';
+    async function refreshRoutes() {
+      try {
+        const [nextRoutes, vehiclesResponse] = await Promise.all([
+          fetchDatabaseRoutes(),
+          fetch('/api/vehicles', { cache: 'no-store' }),
+        ]);
+        const vehicleData = await vehiclesResponse.json().catch(() => null);
+        if (!vehiclesResponse.ok)
+          throw new Error('Gagal memuat posisi angkot.');
+        if (!active) return;
+        setRoutesError('');
+        setVehicles(vehicleData?.vehicles ?? []);
+        if (nextRoutes.length === 0) {
+          setRouteList([]);
+          setRouteIndex(0);
+          return;
+        }
+        const preferredCode = selectedRouteCodeRef.current;
+        const matchingIndex = nextRoutes.findIndex(
+          (item) => item.code === preferredCode,
+        );
+        const nextIndex = matchingIndex >= 0 ? matchingIndex : 0;
+        selectedRouteCodeRef.current = nextRoutes[nextIndex].code;
+        setRouteList(nextRoutes);
+        setRouteIndex(nextIndex);
+      } catch (error) {
+        if (active)
+          setRoutesError(
+            error instanceof Error
+              ? error.message
+              : 'Gagal memuat data transportasi.',
           );
-      })
-      .catch(() => {});
+      } finally {
+        if (active) setRoutesReady(true);
+      }
+    }
+    const refreshWhenVisible = () => {
+      if (!document.hidden) void refreshRoutes();
+    };
+    const refreshFromStorage = (event: StorageEvent) => {
+      if (event.key === ROUTES_UPDATED_EVENT) void refreshRoutes();
+    };
+
+    void refreshRoutes();
+    const timer = window.setInterval(refreshRoutes, 5_000);
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    window.addEventListener(ROUTES_UPDATED_EVENT, refreshWhenVisible);
+    window.addEventListener('storage', refreshFromStorage);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+      window.removeEventListener(ROUTES_UPDATED_EVENT, refreshWhenVisible);
+      window.removeEventListener('storage', refreshFromStorage);
+    };
   }, []);
+  useEffect(() => {
+    if (!authenticated) return;
+    let active = true;
+    fetch('/api/pickups', { cache: 'no-store' })
+      .then(async (response) => {
+        const data = await response.json().catch(() => null);
+        if (!response.ok)
+          throw new Error(data?.error ?? 'Gagal memuat jemput.');
+        if (active) setPickup(data?.pickups?.[0] ?? null);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [authenticated]);
   async function togglePickup() {
+    if (requestingPickup) return;
     if (pickup) {
+      setRequestingPickup(true);
       const res = await fetch(`/api/pickups/${pickup.id}`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
@@ -360,44 +418,121 @@ function PassengerView({
       if (res.ok) {
         setPickup(null);
         setMessage('Permintaan jemput dibatalkan.');
+      } else {
+        const data = await res.json().catch(() => null);
+        setMessage(data?.error ?? 'Permintaan jemput gagal dibatalkan.');
       }
+      setRequestingPickup(false);
       return;
     }
-    if (!route.id) {
-      setMessage('Masuk dan jalankan seed database untuk mengaktifkan jemput.');
+    if (!route?.id) {
+      setMessage('Trayek belum tersedia. Hubungi administrator Traslink.');
       return;
     }
+    if (!hasUsablePath) {
+      setMessage(
+        'Rute untuk arah ini belum tersedia. Silakan pilih arah lain.',
+      );
+      return;
+    }
+    if (!navigator.geolocation) {
+      setMessage('Perangkat ini tidak mendukung pencarian lokasi.');
+      return;
+    }
+    setRequestingPickup(true);
+    setMessage('Mencari lokasi Anda...');
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
-        const res = await fetch('/api/pickups', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            routeId: route.id,
-            direction,
-            latitude: pos.coords.latitude,
-            longitude: pos.coords.longitude,
-          }),
-        });
-        const data = await res.json();
-        if (res.ok) {
-          setPickup(data.pickup);
-          setNearRoute(true);
-          setMessage('Sinyal jemput terkirim ke supir.');
-        } else {
-          setNearRoute(data.distance ? data.distance <= 150 : false);
-          setMessage(data.error ?? 'Permintaan gagal.');
+        try {
+          setMessage('Mengirim permintaan jemput...');
+          const res = await fetch('/api/pickups', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              routeId: route.id,
+              direction,
+              latitude: pos.coords.latitude,
+              longitude: pos.coords.longitude,
+            }),
+          });
+          const data = await res.json().catch(() => null);
+          if (res.ok) {
+            setPickup(data.pickup);
+            setNearRoute(true);
+            setMessage('Sinyal jemput terkirim ke supir.');
+          } else {
+            setNearRoute(data?.distance ? data.distance <= 150 : false);
+            setMessage(data?.error ?? 'Permintaan gagal.');
+          }
+        } catch {
+          setMessage('Tidak dapat terhubung ke server. Silakan coba lagi.');
+        } finally {
+          setRequestingPickup(false);
         }
       },
-      () =>
-        setMessage('Izinkan akses lokasi agar fitur jemput dapat digunakan.'),
+      () => {
+        setMessage('Izinkan akses lokasi agar fitur jemput dapat digunakan.');
+        setRequestingPickup(false);
+      },
       { enableHighAccuracy: true },
+    );
+  }
+  if (!routesReady) {
+    return (
+      <main className="relative h-dvh min-h-[680px] overflow-hidden bg-[#e8eee9] text-slate-950">
+        <TopNav
+          view="passenger"
+          setView={setView}
+          allowedViews={allowedViews}
+          authenticated={authenticated}
+          onAdminLogin={onAdminLogin}
+        />
+        <div className="absolute inset-0 grid place-items-center">
+          <div className="rounded-xl bg-white/90 px-4 py-3 text-xs font-semibold text-slate-500 shadow-map">
+            Memuat rute terbaru...
+          </div>
+        </div>
+      </main>
+    );
+  }
+  if (!route) {
+    return (
+      <main className="relative h-dvh min-h-[680px] overflow-hidden bg-[#e8eee9] text-slate-950">
+        <MapCanvas />
+        <TopNav
+          view="passenger"
+          setView={setView}
+          allowedViews={allowedViews}
+          authenticated={authenticated}
+          onAdminLogin={onAdminLogin}
+        />
+        <div className="absolute inset-0 z-20 grid place-items-center px-4">
+          <div className="max-w-sm rounded-2xl border bg-white/95 p-5 text-center shadow-map">
+            <Route className="mx-auto mb-3 size-7 text-slate-400" />
+            <h2 className="font-extrabold">Belum ada trayek tersedia</h2>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              {routesError ||
+                'Trayek akan tampil setelah administrator menambahkannya.'}
+            </p>
+          </div>
+        </div>
+      </main>
     );
   }
   return (
     <main className="relative h-dvh min-h-[680px] overflow-hidden text-slate-950">
-      <MapCanvas routeData={route} direction={direction} />
-      <TopNav view="passenger" setView={setView} allowedViews={allowedViews} />
+      <MapCanvas
+        routeData={route}
+        direction={direction}
+        vehicles={vehicleLocations}
+      />
+      <TopNav
+        view="passenger"
+        setView={setView}
+        allowedViews={allowedViews}
+        authenticated={authenticated}
+        onAdminLogin={onAdminLogin}
+      />
       <section className="absolute left-1/2 top-24 z-30 w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 rounded-[22px] border border-white/80 bg-white/94 p-3 shadow-map backdrop-blur-xl">
         <button
           onClick={() => setOpen(!open)}
@@ -427,6 +562,11 @@ function PassengerView({
               <button
                 key={r.code}
                 onClick={() => {
+                  selectedRouteCodeRef.current = r.code;
+                  localStorage.setItem('traslink:selected-route', r.code);
+                  const url = new URL(window.location.href);
+                  url.searchParams.set('route', r.code);
+                  window.history.replaceState(null, '', url);
                   setRouteIndex(i);
                   setOpen(false);
                 }}
@@ -451,28 +591,17 @@ function PassengerView({
             onClick={() => setDirection('A')}
             className={`rounded-lg px-3 py-2 text-xs font-bold ${direction === 'A' ? 'bg-white shadow-sm' : 'text-slate-500'}`}
           >
-            Ke {route.name.split(' — ')[1]}
+            Ke {route.destination}
           </button>
           <ArrowLeftRight className="size-3.5 text-slate-400" />
           <button
             onClick={() => setDirection('B')}
             className={`rounded-lg px-3 py-2 text-xs font-bold ${direction === 'B' ? 'bg-white shadow-sm' : 'text-slate-500'}`}
           >
-            Ke {route.name.split(' — ')[0]}
+            Ke {route.origin}
           </button>
         </div>
       </section>
-      <div className="absolute bottom-61 right-4 z-20 md:bottom-8 md:right-7">
-        <Button
-          onClick={() => setNearRoute(!nearRoute)}
-          variant="outline"
-          size="icon-lg"
-          className={`rounded-xl border-white bg-white shadow-map ${nearRoute ? 'text-coral' : 'text-slate-400'}`}
-          aria-label="Simulasikan lokasi"
-        >
-          <LocateFixed />
-        </Button>
-      </div>
       <section className="absolute inset-x-3 bottom-3 z-30 mx-auto max-w-3xl rounded-[26px] border border-white/80 bg-white/96 p-4 shadow-sheet backdrop-blur-xl md:bottom-6 md:p-5">
         <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-slate-200 md:hidden" />
         <div className="flex items-start justify-between gap-3">
@@ -484,7 +613,7 @@ function PassengerView({
               <div className="flex items-center gap-2">
                 <h2 className="font-extrabold">Angkot {route.code}</h2>
                 <Badge className="bg-emerald-50 text-emerald-700">
-                  {route.active} aktif
+                  {route.activeVehicles ?? 0} aktif
                 </Badge>
               </div>
               <p className="mt-0.5 text-xs text-slate-500">
@@ -494,28 +623,48 @@ function PassengerView({
           </div>
           <div className="text-right">
             <p className="text-xs text-slate-400">Terdekat</p>
-            <p className="text-lg font-black text-coral">3 menit</p>
+            <p className="text-lg font-black text-coral">
+              {vehicleLocations.length > 0
+                ? `${vehicleLocations.length} terlacak`
+                : 'GPS offline'}
+            </p>
           </div>
         </div>
+        {assignedActiveVehicles.length > 0 && vehicleLocations.length === 0 && (
+          <p className="mb-3 rounded-xl bg-amber-50 px-3 py-2 text-center text-[11px] font-semibold text-amber-700">
+            Angkot beroperasi, tetapi belum mengirim posisi GPS terbaru di
+            sekitar trayek ini.
+          </p>
+        )}
         <div className="my-4 grid grid-cols-3 divide-x divide-slate-100 rounded-xl bg-slate-50 py-3 text-center">
-          <Info icon={<Clock3 />} text="05.00–21.00" />
-          <Info icon={<Users />} text="12 kursi" />
+          <Info
+            icon={<Clock3 />}
+            text={`${route.operatingStart ?? '—'}–${route.operatingEnd ?? '—'}`}
+          />
+          <Info icon={<Users />} text={`${route.fleet} angkot`} />
           <Info icon={<ShieldCheck />} text="Terverifikasi" />
         </div>
         <Button
-          disabled={!nearRoute}
+          disabled={!hasUsablePath || requestingPickup}
           onClick={togglePickup}
           className={`h-12 w-full rounded-xl text-sm font-bold ${pickup ? 'bg-rose-50 text-[#e54836] hover:bg-rose-100' : 'bg-coral text-white hover:bg-[#ec4b39]'}`}
         >
-          <MapPin /> {pickup ? 'Batal Jemput di Sini' : 'Jemput di Sini'}
+          <MapPin />{' '}
+          {requestingPickup
+            ? 'Memproses...'
+            : pickup
+              ? 'Batal Jemput di Sini'
+              : 'Jemput di Sini'}
         </Button>
         <p
           className={`mt-2 text-center text-[11px] ${nearRoute ? 'text-slate-400' : 'font-semibold text-amber-600'}`}
         >
           {message ||
-            (nearRoute
-              ? 'Lokasi akan diverifikasi terhadap jalur · Maksimal 150 m'
-              : 'Kamu terlalu jauh dari jalur · Dekati jalur untuk meminta jemput')}
+            (!hasUsablePath
+              ? 'Rute untuk arah ini belum digambar oleh admin.'
+              : nearRoute
+                ? 'Lokasi akan diverifikasi terhadap jalur · Maksimal 150 m'
+                : 'Kamu terlalu jauh dari jalur · Dekati jalur untuk meminta jemput')}
         </p>
       </section>
     </main>
@@ -533,6 +682,34 @@ function Info({ icon, text }: { icon: React.ReactNode; text: string }) {
   );
 }
 
+type DriverPickup = {
+  id: string;
+  status: 'WAITING' | 'ACCEPTED';
+  passengerName: string;
+  passengerPhone: string | null;
+  distanceToRouteMeters: number;
+  createdAt: string;
+  waitMinutes: number;
+  latitude: number;
+  longitude: number;
+};
+type DriverDashboardData = {
+  vehicle: {
+    id: string;
+    plateNumber: string;
+    capacity: number;
+    status: VehicleStatus;
+  } | null;
+  route: AppRoute | null;
+  position: {
+    latitude: number;
+    longitude: number;
+    recordedAt: string;
+    locationFresh: boolean;
+  } | null;
+  pickups: DriverPickup[];
+};
+
 function DriverView({
   setView,
   allowedViews,
@@ -540,79 +717,208 @@ function DriverView({
   setView: (v: View) => void;
   allowedViews: View[];
 }) {
-  const [online, setOnline] = useState(true);
-  const [accepted, setAccepted] = useState<string[]>([]);
+  const [dashboard, setDashboard] = useState<DriverDashboardData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [signals, setSignals] = useState([
-    {
-      id: 'demo-1',
-      name: 'Nadia P.',
-      distance: '120 m',
-      wait: '2 menit',
-      phone: '081100000003',
-      latitude: -6.9155,
-      longitude: 107.6218,
-    },
-    {
-      id: 'demo-2',
-      name: 'Bima A.',
-      distance: '650 m',
-      wait: '5 menit',
-      phone: '081100000004',
-      latitude: -6.9211,
-      longitude: 107.6048,
-    },
-  ]);
+  const [refreshToken, setRefreshToken] = useState(0);
+  const [trackingState, setTrackingState] = useState<
+    'idle' | 'requesting' | 'tracking' | 'denied' | 'error'
+  >('idle');
+  const lastLocationSentAtRef = useRef(0);
   useEffect(() => {
     let alive = true;
     const load = () =>
-      fetch('/api/pickups')
-        .then((r) => (r.ok ? r.json() : null))
+      fetch('/api/driver/dashboard', { cache: 'no-store' })
+        .then(async (response) => {
+          const data = await response.json().catch(() => null);
+          if (!response.ok)
+            throw new Error(data?.error ?? 'Gagal memuat halaman sopir.');
+          return data;
+        })
         .then((data) => {
-          if (alive && data?.pickups?.length)
-            setSignals(
-              data.pickups.map(
-                (p: {
-                  id: string;
-                  passengerName: string;
-                  distanceToRouteMeters: number;
-                  passengerPhone: string;
-                  createdAt: string;
-                  latitude: number;
-                  longitude: number;
-                }) => ({
-                  id: p.id,
-                  name: p.passengerName,
-                  distance: `${Math.round(p.distanceToRouteMeters)} m`,
-                  wait: `${Math.max(1, Math.round((Date.now() - new Date(p.createdAt).getTime()) / 60000))} menit`,
-                  phone: p.passengerPhone ?? 'Tidak tersedia',
-                  latitude: p.latitude,
-                  longitude: p.longitude,
-                }),
+          if (!alive) return;
+          setDashboard({
+            ...data,
+            route: data.route ? normalizeDatabaseRoutes([data.route])[0] : null,
+            pickups: (data.pickups ?? []).map((pickup: DriverPickup) => ({
+              ...pickup,
+              waitMinutes: Math.max(
+                1,
+                Math.round(
+                  (Date.now() - new Date(pickup.createdAt).getTime()) / 60000,
+                ),
               ),
+            })),
+          });
+          setError('');
+        })
+        .catch((loadError) => {
+          if (alive)
+            setError(
+              loadError instanceof Error
+                ? loadError.message
+                : 'Gagal memuat halaman sopir.',
             );
+        })
+        .finally(() => {
+          if (alive) setLoading(false);
         });
-    load();
-    const timer = setInterval(load, 10000);
+    const refreshWhenVisible = () => {
+      if (!document.hidden) void load();
+    };
+    const refreshFromStorage = (event: StorageEvent) => {
+      if (event.key === ROUTES_UPDATED_EVENT) void load();
+    };
+    void load();
+    const timer = window.setInterval(load, 5_000);
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    window.addEventListener(ROUTES_UPDATED_EVENT, refreshWhenVisible);
+    window.addEventListener('storage', refreshFromStorage);
     return () => {
       alive = false;
-      clearInterval(timer);
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+      window.removeEventListener(ROUTES_UPDATED_EVENT, refreshWhenVisible);
+      window.removeEventListener('storage', refreshFromStorage);
     };
-  }, []);
-  async function accept(id: string, name: string) {
-    if (!id.startsWith('demo-')) {
-      const res = await fetch(`/api/pickups/${id}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'accept' }),
-      });
-      if (!res.ok) return;
+  }, [refreshToken]);
+
+  const vehicle = dashboard?.vehicle ?? null;
+  const route = dashboard?.route ?? null;
+  const signals = dashboard?.pickups ?? [];
+  const online = vehicle?.status === 'ACTIVE';
+  const vehicleId = vehicle?.id;
+
+  useEffect(() => {
+    if (!online || !vehicleId || !navigator.geolocation) return;
+    let active = true;
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        if (!active) return;
+        const now = Date.now();
+        if (now - lastLocationSentAtRef.current < 5_000) return;
+        lastLocationSentAtRef.current = now;
+        void fetch('/api/driver/location', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            heading: position.coords.heading,
+            speedKph:
+              position.coords.speed == null
+                ? null
+                : position.coords.speed * 3.6,
+            accuracyMeters: position.coords.accuracy,
+          }),
+        })
+          .then(async (response) => {
+            const data = await response.json().catch(() => null);
+            if (!response.ok)
+              throw new Error(data?.error ?? 'Posisi gagal dikirim.');
+            if (!active) return;
+            setTrackingState('tracking');
+            setDashboard((current) =>
+              current
+                ? {
+                    ...current,
+                    position: {
+                      latitude: data.position.latitude,
+                      longitude: data.position.longitude,
+                      recordedAt: data.position.recordedAt,
+                      locationFresh: true,
+                    },
+                  }
+                : current,
+            );
+          })
+          .catch(() => {
+            if (active) setTrackingState('error');
+          });
+      },
+      (locationError) => {
+        if (!active) return;
+        setTrackingState(locationError.code === 1 ? 'denied' : 'error');
+      },
+      { enableHighAccuracy: true, maximumAge: 5_000, timeout: 20_000 },
+    );
+    return () => {
+      active = false;
+      navigator.geolocation.clearWatch(watchId);
+    };
+  }, [online, vehicleId]);
+
+  async function updateStatus() {
+    if (!dashboard?.vehicle) return;
+    const nextStatus =
+      dashboard.vehicle.status === 'ACTIVE' ? 'RESTING' : 'ACTIVE';
+    const response = await fetch('/api/driver/dashboard', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: nextStatus }),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      setNotice(data?.error ?? 'Gagal memperbarui status operasional.');
+      return;
     }
-    setAccepted([...accepted, name]);
+    setNotice(
+      nextStatus === 'ACTIVE'
+        ? 'Angkot mulai beroperasi.'
+        : 'Angkot berstatus istirahat.',
+    );
+    setTrackingState('idle');
+    setRefreshToken((value) => value + 1);
   }
+
+  async function updatePickup(id: string, action: 'accept' | 'complete') {
+    const response = await fetch(`/api/pickups/${id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      setNotice(data?.error ?? 'Permintaan jemput gagal diperbarui.');
+      setRefreshToken((value) => value + 1);
+      return;
+    }
+    setNotice(
+      action === 'accept'
+        ? 'Permintaan jemput diterima.'
+        : 'Penumpang telah dijemput.',
+    );
+    setRefreshToken((value) => value + 1);
+  }
+
+  const vehicleMarkers =
+    vehicle && dashboard?.position?.locationFresh
+      ? [
+          {
+            id: vehicle.id,
+            label: vehicle.plateNumber,
+            latitude: dashboard.position.latitude,
+            longitude: dashboard.position.longitude,
+          },
+        ]
+      : [];
+  const pickupMarkers = signals.map((signal) => ({
+    id: signal.id,
+    label: `${signal.passengerName} · ${Math.round(signal.distanceToRouteMeters)} m`,
+    latitude: signal.latitude,
+    longitude: signal.longitude,
+  }));
+
   return (
     <main className="relative h-dvh min-h-[700px] overflow-hidden">
-      <MapCanvas driver />
+      <MapCanvas
+        routeData={route ?? undefined}
+        vehicles={vehicleMarkers}
+        pickups={pickupMarkers}
+      />
       <TopNav view="driver" setView={setView} allowedViews={allowedViews} />
       <div className="absolute left-4 top-24 z-30 rounded-2xl bg-ink p-3 text-white shadow-map md:left-7">
         <div className="flex items-center gap-3">
@@ -620,13 +926,37 @@ function DriverView({
             className={`size-2.5 rounded-full ${online ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`}
           />
           <div>
-            <p className="text-[10px] text-white/55">D 1924 UA · Trayek 05</p>
+            <p className="text-[10px] text-white/55">
+              {vehicle
+                ? `${vehicle.plateNumber} · ${route ? `Trayek ${route.code}` : 'Belum ada trayek'}`
+                : 'Belum ada angkot yang ditugaskan'}
+            </p>
             <b className="text-sm">
-              {online ? 'Sedang beroperasi' : 'Tidak aktif'}
+              {loading
+                ? 'Memuat data...'
+                : online
+                  ? 'Sedang beroperasi'
+                  : vehicle
+                    ? 'Sedang istirahat'
+                    : 'Hubungi administrator'}
             </b>
+            {online && (
+              <p
+                className={`mt-0.5 text-[10px] ${trackingState === 'tracking' ? 'text-emerald-300' : trackingState === 'denied' || trackingState === 'error' ? 'text-amber-300' : 'text-white/55'}`}
+              >
+                {trackingState === 'tracking'
+                  ? 'Lokasi GPS sedang dibagikan'
+                  : trackingState === 'denied'
+                    ? 'Izin lokasi ditolak'
+                    : trackingState === 'error'
+                      ? 'Lokasi GPS tidak tersedia'
+                      : 'Menunggu izin lokasi...'}
+              </p>
+            )}
           </div>
           <button
-            onClick={() => setOnline(!online)}
+            onClick={updateStatus}
+            disabled={!vehicle || loading}
             className={`ml-3 rounded-lg px-3 py-1.5 text-xs font-bold ${online ? 'bg-white/12' : 'bg-emerald-500'}`}
           >
             {online ? 'Selesai' : 'Mulai'}
@@ -640,39 +970,52 @@ function DriverView({
               Permintaan jemput
             </p>
             <h2 className="text-lg font-extrabold">
-              {signals.length} penumpang di depan
+              {signals.length} permintaan aktif
             </h2>
           </div>
           <Badge className="bg-coral text-white">
             <Radio className="size-3" /> Live
           </Badge>
         </div>
-        {notice && (
-          <p className="mb-3 rounded-lg bg-emerald-50 p-2 text-xs font-semibold text-emerald-700">
-            {notice}
+        {(notice || error) && (
+          <p
+            className={`mb-3 rounded-lg p-2 text-xs font-semibold ${error ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}
+          >
+            {error || notice}
           </p>
         )}
         <div className="space-y-2">
+          {!loading && signals.length === 0 && (
+            <div className="rounded-2xl border border-dashed bg-slate-50 p-5 text-center">
+              <MapPin className="mx-auto mb-2 size-5 text-slate-400" />
+              <p className="text-xs font-semibold text-slate-600">
+                {route
+                  ? 'Belum ada permintaan jemput pada trayek ini.'
+                  : 'Trayek belum ditugaskan pada angkot Anda.'}
+              </p>
+            </div>
+          )}
           {signals.map((s) => (
-            <div key={s.name} className="rounded-2xl border bg-white p-3">
+            <div key={s.id} className="rounded-2xl border bg-white p-3">
               <div className="flex items-center gap-3">
                 <span className="grid size-10 place-items-center rounded-full bg-[#fff0ed] font-black text-coral">
-                  {s.name[0]}
+                  {s.passengerName[0]}
                 </span>
                 <div className="min-w-0 flex-1">
-                  <b className="text-sm">{s.name}</b>
+                  <b className="text-sm">{s.passengerName}</b>
                   <p className="text-xs text-slate-500">
-                    {s.distance} · menunggu {s.wait}
+                    {Math.round(s.distanceToRouteMeters)} m dari trayek ·{' '}
+                    {s.waitMinutes} menit
                   </p>
                 </div>
-                {accepted.includes(s.name) ? (
+                {s.status === 'ACCEPTED' ? (
                   <Badge className="bg-emerald-50 text-emerald-700">
                     <Check />
                     Diterima
                   </Badge>
                 ) : (
                   <Button
-                    onClick={() => accept(s.id, s.name)}
+                    onClick={() => updatePickup(s.id, 'accept')}
                     size="sm"
                     className="bg-ink"
                   >
@@ -680,30 +1023,38 @@ function DriverView({
                   </Button>
                 )}
               </div>
-              {accepted.includes(s.name) && (
-                <div className="mt-3 flex gap-2 border-t pt-3">
+              {s.status === 'ACCEPTED' && (
+                <div className="mt-3 grid grid-cols-3 gap-2 border-t pt-3">
                   <Button
+                    disabled={!s.passengerPhone}
                     onClick={() => {
-                      setNotice(`Menghubungi ${s.name} di ${s.phone}`);
-                      location.href = `tel:${s.phone}`;
+                      if (!s.passengerPhone) return;
+                      setNotice(`Menghubungi ${s.passengerName}.`);
+                      location.href = `tel:${s.passengerPhone}`;
                     }}
                     variant="outline"
-                    className="flex-1"
+                    className="px-2"
                   >
                     <Phone /> Hubungi
                   </Button>
                   <Button
                     onClick={() => {
-                      setNotice(`Membuka navigasi menuju ${s.name}`);
+                      setNotice(`Membuka navigasi menuju ${s.passengerName}`);
                       window.open(
                         `https://www.google.com/maps/dir/?api=1&destination=${s.latitude},${s.longitude}`,
                         '_blank',
                         'noopener,noreferrer',
                       );
                     }}
-                    className="flex-1 bg-coral"
+                    className="px-2 bg-coral"
                   >
                     <Navigation /> Navigasi
+                  </Button>
+                  <Button
+                    onClick={() => updatePickup(s.id, 'complete')}
+                    className="px-2 bg-emerald-600"
+                  >
+                    <Check /> Selesai
                   </Button>
                 </div>
               )}
@@ -711,7 +1062,7 @@ function DriverView({
           ))}
         </div>
         <p className="mt-3 flex items-center justify-center gap-1 text-[11px] text-slate-400">
-          <Gauge className="size-3" /> Diperbarui otomatis setiap 10 detik
+          <Gauge className="size-3" /> Diperbarui otomatis setiap 5 detik
         </p>
       </section>
     </main>
@@ -1338,9 +1689,145 @@ function Overview({ setTab }: { setTab: (t: AdminTab) => void }) {
   );
 }
 
+function RouteLocationSearch({
+  onFocus,
+  onAdd,
+}: {
+  onFocus: (result: LocationSearchResult) => void;
+  onAdd: (result: LocationSearchResult) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<LocationSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [error, setError] = useState('');
+
+  async function searchLocation(event: React.FormEvent) {
+    event.preventDefault();
+    const cleanQuery = query.trim();
+    if (cleanQuery.length < 3) {
+      setError('Masukkan minimal 3 karakter.');
+      return;
+    }
+    setSearching(true);
+    setError('');
+    try {
+      const response = await fetch(
+        `/api/geocoding/search?q=${encodeURIComponent(cleanQuery)}`,
+        { cache: 'no-store' },
+      );
+      const data = await response.json().catch(() => null);
+      if (!response.ok)
+        throw new Error(
+          typeof data?.error === 'string'
+            ? data.error
+            : 'Gagal mencari lokasi.',
+        );
+      setResults(Array.isArray(data?.results) ? data.results : []);
+      if (!data?.results?.length)
+        setError(
+          'Lokasi tidak ditemukan. Coba nama jalan atau area yang lebih lengkap.',
+        );
+    } catch (reason) {
+      setResults([]);
+      setError(
+        reason instanceof Error ? reason.message : 'Gagal mencari lokasi.',
+      );
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  return (
+    <div className="absolute left-3 top-3 z-30 w-[min(360px,calc(100%-1.5rem))]">
+      <form
+        onSubmit={searchLocation}
+        className="flex gap-2 rounded-xl border bg-white/95 p-2 shadow-map backdrop-blur"
+      >
+        <div className="relative min-w-0 flex-1">
+          <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-slate-400" />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Cari jalan, terminal, atau tempat..."
+            className="h-9 bg-white pl-8"
+            aria-label="Cari lokasi di peta"
+          />
+        </div>
+        <Button type="submit" disabled={searching} className="h-9 bg-ink px-3">
+          {searching ? 'Mencari...' : 'Cari'}
+        </Button>
+      </form>
+      {(results.length > 0 || error) && (
+        <div className="mt-2 overflow-hidden rounded-xl border bg-white shadow-map">
+          <div className="flex items-center justify-between border-b px-3 py-2">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+              Hasil pencarian
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setResults([]);
+                setError('');
+              }}
+              className="grid size-7 place-items-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+              aria-label="Tutup hasil pencarian"
+              title="Tutup hasil pencarian"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+          {error && (
+            <p className="p-3 text-[11px] font-semibold text-amber-700">
+              {error}
+            </p>
+          )}
+          {results.map((result) => (
+            <div
+              key={result.id}
+              className="flex items-center gap-1 border-t first:border-t-0"
+            >
+              <button
+                type="button"
+                onClick={() => onFocus(result)}
+                className="min-w-0 flex-1 px-3 py-2.5 text-left hover:bg-slate-50"
+              >
+                <b className="line-clamp-1 block text-xs">{result.name}</b>
+                <span className="text-[10px] capitalize text-slate-400">
+                  {result.type} · {result.lat.toFixed(5)},{' '}
+                  {result.lng.toFixed(5)}
+                </span>
+              </button>
+              <Button
+                type="button"
+                onClick={() => onAdd(result)}
+                variant="ghost"
+                size="sm"
+                className="mr-2 text-coral"
+                title="Tambahkan sebagai titik rute berikutnya"
+              >
+                <Plus /> Titik
+              </Button>
+            </div>
+          ))}
+          <a
+            href="https://www.openstreetmap.org/copyright"
+            target="_blank"
+            rel="noreferrer"
+            className="block border-t px-3 py-1.5 text-[9px] text-slate-400 hover:text-slate-600"
+          >
+            Pencarian © OpenStreetMap contributors
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RoutesPanel() {
   const [items, setItems] = useState<AppRoute[]>([]);
   const [selected, setSelected] = useState(0);
+  const [routeQuery, setRouteQuery] = useState('');
+  const [routePage, setRoutePage] = useState(1);
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1348,7 +1835,61 @@ function RoutesPanel() {
   const [showRouteForm, setShowRouteForm] = useState(false);
   const [editingRoute, setEditingRoute] = useState(false);
   const [direction, setDirection] = useState<'A' | 'B'>('A');
+  const [focusPoint, setFocusPoint] = useState<MapFocusPoint | null>(null);
+  const [savedPaths, setSavedPaths] = useState<
+    Record<string, { pathA: RoutePoint[]; pathB: RoutePoint[] }>
+  >({});
+  const filteredRoutes = useMemo(() => {
+    const query = routeQuery.trim().toLocaleLowerCase('id-ID');
+    return items
+      .map((route, index) => ({ route, index }))
+      .filter(({ route }) =>
+        query
+          ? [
+              route.code,
+              route.name,
+              route.origin,
+              route.destination,
+              route.via,
+            ].some((value) => value.toLocaleLowerCase('id-ID').includes(query))
+          : true,
+      );
+  }, [items, routeQuery]);
+  const totalRoutePages = Math.max(
+    1,
+    Math.ceil(filteredRoutes.length / ROUTES_PER_PAGE),
+  );
+  const currentRoutePage = Math.min(routePage, totalRoutePages);
+  const visibleRoutes = filteredRoutes.slice(
+    (currentRoutePage - 1) * ROUTES_PER_PAGE,
+    currentRoutePage * ROUTES_PER_PAGE,
+  );
   const current = items[selected] ?? items[0] ?? null;
+  const routeKey = current?.id ?? current?.code ?? '';
+  const currentPath = current
+    ? direction === 'A'
+      ? current.pathA
+      : current.pathB
+    : [];
+  const reverseDirection = direction === 'A' ? 'B' : 'A';
+  const savedRoutePaths = savedPaths[routeKey];
+  const hasUnsavedChanges = Boolean(
+    current &&
+    savedRoutePaths &&
+    (JSON.stringify(current.pathA) !== JSON.stringify(savedRoutePaths.pathA) ||
+      JSON.stringify(current.pathB) !== JSON.stringify(savedRoutePaths.pathB)),
+  );
+
+  function rememberSavedPaths(routeList: AppRoute[]) {
+    setSavedPaths(
+      Object.fromEntries(
+        routeList.map((route) => [
+          route.id ?? route.code,
+          { pathA: route.pathA, pathB: route.pathB },
+        ]),
+      ),
+    );
+  }
 
   async function loadRoutes() {
     setLoading(true);
@@ -1356,6 +1897,7 @@ function RoutesPanel() {
     try {
       const databaseRoutes = await fetchDatabaseRoutes();
       setItems(databaseRoutes);
+      rememberSavedPaths(databaseRoutes);
       setSelected((index) =>
         Math.min(index, Math.max(databaseRoutes.length - 1, 0)),
       );
@@ -1376,6 +1918,7 @@ function RoutesPanel() {
       .then((databaseRoutes) => {
         if (cancelled) return;
         setItems(databaseRoutes);
+        rememberSavedPaths(databaseRoutes);
         setSelected((index) =>
           Math.min(index, Math.max(databaseRoutes.length - 1, 0)),
         );
@@ -1397,7 +1940,6 @@ function RoutesPanel() {
   }, []);
 
   function updatePath(path: RoutePoint[]) {
-    if (path.length < 2) return;
     setItems((currentItems) =>
       currentItems.map((route, index) =>
         index === selected
@@ -1431,6 +1973,10 @@ function RoutesPanel() {
 
   async function save() {
     if (!current || saving) return;
+    if (current.pathA.length < 2 || current.pathB.length < 2) {
+      setNotice('Setiap arah harus memiliki minimal 2 titik sebelum disimpan.');
+      return;
+    }
     setSaving(true);
     setNotice('');
     try {
@@ -1476,6 +2022,14 @@ function RoutesPanel() {
           ),
         );
       }
+      setSavedPaths((paths) => ({
+        ...paths,
+        [routeToSave.id ?? routeToSave.code]: {
+          pathA: routeToSave.pathA,
+          pathB: routeToSave.pathB,
+        },
+      }));
+      announceRoutesUpdated();
       setNotice('Perubahan rute berhasil disimpan.');
     } catch (error) {
       setNotice(
@@ -1496,7 +2050,8 @@ function RoutesPanel() {
     const destination = String(form.get('destination') || '').trim();
     const payload = {
       code,
-      name: String(form.get('name') || '').trim(),
+      name:
+        String(form.get('name') || '').trim() || `${origin} — ${destination}`,
       origin,
       destination,
       via: String(form.get('via') || '').trim(),
@@ -1520,14 +2075,29 @@ function RoutesPanel() {
     });
     const data = await res.json();
     if (res.ok) {
-      setItems([
-        ...items,
-        { ...data.route, stops: 0, activeVehicles: 0, fleet: 0 },
-      ]);
+      const createdRoute = {
+        ...data.route,
+        stops: 0,
+        activeVehicles: 0,
+        fleet: 0,
+      };
+      setItems([...items, createdRoute]);
+      setSavedPaths((paths) => ({
+        ...paths,
+        [createdRoute.id ?? createdRoute.code]: {
+          pathA: createdRoute.pathA,
+          pathB: createdRoute.pathB,
+        },
+      }));
       setSelected(items.length);
+      setRouteQuery('');
+      setRoutePage(Math.ceil((items.length + 1) / ROUTES_PER_PAGE));
       setDirection('A');
       setShowRouteForm(false);
-      setNotice(`Trayek ${code} berhasil ditambahkan.`);
+      announceRoutesUpdated();
+      setNotice(
+        `Trayek ${code} berhasil dibuat. Sekarang gambar rute arah pergi.`,
+      );
     } else
       setNotice(
         typeof data.error === 'string'
@@ -1562,6 +2132,7 @@ function RoutesPanel() {
         ),
       );
       setEditingRoute(false);
+      announceRoutesUpdated();
       setNotice('Data trayek berhasil diperbarui.');
     } else {
       setNotice(
@@ -1593,6 +2164,7 @@ function RoutesPanel() {
     );
     setSelected(0);
     setDirection('A');
+    announceRoutesUpdated();
     setNotice(`Trayek ${current.code} berhasil dinonaktifkan.`);
   }
   return (
@@ -1603,7 +2175,9 @@ function RoutesPanel() {
             <div>
               <h2 className="text-xl font-black">Daftar trayek</h2>
               <p className="text-xs text-slate-400">
-                {items.length} trayek terdaftar
+                {routeQuery
+                  ? `${filteredRoutes.length} dari ${items.length} trayek`
+                  : `${items.length} trayek terdaftar`}
               </p>
             </div>
             <Button
@@ -1614,6 +2188,34 @@ function RoutesPanel() {
               <Plus /> Tambah
             </Button>
           </div>
+          <InputGroup className="mb-3 h-10 bg-white">
+            <InputGroupAddon>
+              <Search />
+            </InputGroupAddon>
+            <InputGroupInput
+              value={routeQuery}
+              onChange={(event) => {
+                setRouteQuery(event.target.value);
+                setRoutePage(1);
+              }}
+              placeholder="Cari kode, nama, asal, tujuan, atau via..."
+              aria-label="Cari trayek"
+            />
+            {routeQuery && (
+              <InputGroupAddon align="inline-end">
+                <InputGroupButton
+                  onClick={() => {
+                    setRouteQuery('');
+                    setRoutePage(1);
+                  }}
+                  size="icon-xs"
+                  aria-label="Hapus pencarian trayek"
+                >
+                  <X />
+                </InputGroupButton>
+              </InputGroupAddon>
+            )}
+          </InputGroup>
           {loadError && (
             <div className="mb-3 rounded-xl bg-red-50 p-3 text-xs font-semibold text-red-700">
               <p>{loadError}</p>
@@ -1640,7 +2242,7 @@ function RoutesPanel() {
                 Memuat trayek dari database...
               </p>
             )}
-            {items.map((r, i) => (
+            {visibleRoutes.map(({ route: r, index: i }) => (
               <button
                 key={r.code}
                 onClick={() => {
@@ -1666,7 +2268,76 @@ function RoutesPanel() {
                 </div>
               </button>
             ))}
+            {!loading && filteredRoutes.length === 0 && (
+              <div className="rounded-2xl border border-dashed bg-white/60 p-6 text-center">
+                <Search className="mx-auto size-5 text-slate-300" />
+                <p className="mt-2 text-xs font-semibold text-slate-600">
+                  Trayek tidak ditemukan
+                </p>
+                <p className="mt-1 text-[10px] text-slate-400">
+                  Coba gunakan kode, nama tempat, atau nama jalan lain.
+                </p>
+              </div>
+            )}
           </div>
+          {!loading && filteredRoutes.length > 0 && (
+            <div className="mt-4 border-t pt-3">
+              <p className="mb-2 text-center text-[10px] text-slate-400">
+                Halaman {currentRoutePage} dari {totalRoutePages} ·{' '}
+                {filteredRoutes.length} trayek
+              </p>
+              <Pagination>
+                <PaginationContent className="flex-wrap">
+                  <PaginationItem>
+                    <Button
+                      onClick={() =>
+                        setRoutePage(Math.max(1, currentRoutePage - 1))
+                      }
+                      disabled={currentRoutePage === 1}
+                      variant="ghost"
+                      size="sm"
+                    >
+                      Sebelumnya
+                    </Button>
+                  </PaginationItem>
+                  {Array.from({ length: totalRoutePages }, (_, index) => {
+                    const page = index + 1;
+                    return (
+                      <PaginationItem key={page}>
+                        <Button
+                          onClick={() => setRoutePage(page)}
+                          variant={
+                            page === currentRoutePage ? 'outline' : 'ghost'
+                          }
+                          size="icon-sm"
+                          aria-label={`Buka halaman ${page}`}
+                          aria-current={
+                            page === currentRoutePage ? 'page' : undefined
+                          }
+                        >
+                          {page}
+                        </Button>
+                      </PaginationItem>
+                    );
+                  })}
+                  <PaginationItem>
+                    <Button
+                      onClick={() =>
+                        setRoutePage(
+                          Math.min(totalRoutePages, currentRoutePage + 1),
+                        )
+                      }
+                      disabled={currentRoutePage === totalRoutePages}
+                      variant="ghost"
+                      size="sm"
+                    >
+                      Berikutnya
+                    </Button>
+                  </PaginationItem>
+                </PaginationContent>
+              </Pagination>
+            </div>
+          )}
         </div>
         <div className="overflow-hidden rounded-2xl border bg-white">
           {!current ? (
@@ -1677,86 +2348,284 @@ function RoutesPanel() {
             </div>
           ) : (
             <>
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4">
-                <div>
-                  <Badge className="mb-1 bg-rose-50 text-coral">
-                    Editor rute {current.code}
-                  </Badge>
-                  <h3 className="font-extrabold">{current.name}</h3>
+              <div className="border-b p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="mb-1 flex items-center gap-2">
+                      <Badge className="bg-rose-50 text-coral">
+                        Trayek {current.code}
+                      </Badge>
+                      {hasUnsavedChanges && (
+                        <span className="flex items-center gap-1 text-[11px] font-semibold text-amber-600">
+                          <span className="size-1.5 rounded-full bg-amber-500" />
+                          Belum disimpan
+                        </span>
+                      )}
+                    </div>
+                    <h3 className="font-extrabold">{current.name}</h3>
+                    <p className="mt-0.5 text-xs text-slate-400">
+                      Gambar jalur sesuai urutan kendaraan melaju.
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={() => setEditingRoute(true)}
+                      variant="outline"
+                      size="sm"
+                    >
+                      <Edit3 /> Ubah data
+                    </Button>
+                    <Button
+                      onClick={() => void deleteRoute()}
+                      variant="ghost"
+                      size="sm"
+                      className="text-red-600"
+                    >
+                      <Trash2 /> Nonaktifkan
+                    </Button>
+                  </div>
                 </div>
-                <div className="flex gap-2">
-                  <Button
-                    onClick={() => setEditingRoute(true)}
-                    variant="outline"
-                    size="sm"
-                  >
-                    <Edit3 /> Data
-                  </Button>
-                  <Button
-                    onClick={() => void deleteRoute()}
-                    variant="outline"
-                    size="sm"
-                    className="text-red-600"
-                  >
-                    <Trash2 /> Nonaktifkan
-                  </Button>
-                  <div className="flex rounded-lg border p-0.5">
-                    {(['A', 'B'] as const).map((value) => (
+                <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                  {(['A', 'B'] as const).map((value) => {
+                    const from =
+                      value === 'A' ? current.origin : current.destination;
+                    const to =
+                      value === 'A' ? current.destination : current.origin;
+                    const pointCount =
+                      value === 'A'
+                        ? current.pathA.length
+                        : current.pathB.length;
+                    return (
                       <button
                         key={value}
                         onClick={() => setDirection(value)}
-                        className={`rounded-md px-2.5 py-1 text-xs font-bold ${direction === value ? 'bg-ink text-white' : 'text-slate-500'}`}
+                        className={`flex items-center gap-3 rounded-xl border p-3 text-left transition ${direction === value ? 'border-ink bg-ink text-white shadow-sm' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'}`}
                       >
-                        Arah {value}
+                        <span
+                          className={`grid size-8 shrink-0 place-items-center rounded-lg text-xs font-black ${direction === value ? 'bg-white/15' : 'bg-white'}`}
+                        >
+                          {value}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <b className="block truncate text-xs">
+                            {from} → {to}
+                          </b>
+                          <span
+                            className={`text-[10px] ${direction === value ? 'text-white/60' : 'text-slate-400'}`}
+                          >
+                            {pointCount} titik{' '}
+                            {pointCount >= 2 ? '· siap' : '· belum lengkap'}
+                          </span>
+                        </span>
+                        {pointCount >= 2 && (
+                          <Check className="size-4 text-emerald-400" />
+                        )}
                       </button>
-                    ))}
-                  </div>
-                  <Button
-                    onClick={() =>
-                      updatePath(
-                        (direction === 'A'
-                          ? current.pathA
-                          : current.pathB
-                        ).slice(0, -1),
-                      )
-                    }
-                    disabled={
-                      (direction === 'A' ? current.pathA : current.pathB)
-                        .length <= 2 || saving
-                    }
-                    variant="outline"
-                  >
-                    <Undo2 /> Urungkan
-                  </Button>
-                  <Button
-                    onClick={() => void save()}
-                    disabled={saving}
-                    className="bg-ink"
-                  >
-                    <Check /> {saving ? 'Menyimpan...' : 'Simpan rute'}
-                  </Button>
+                    );
+                  })}
                 </div>
               </div>
-              <div className="relative h-[500px]">
-                <MapCanvas
-                  routeData={current}
-                  direction={direction}
-                  editor
-                  onPathChange={updatePath}
-                />
-                <div className="absolute left-4 top-4 z-20 w-48 rounded-xl bg-white/95 p-3 shadow-map">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                    Petunjuk editor
-                  </p>
-                  <p className="mt-1 text-xs text-slate-600">
-                    Klik peta untuk menambah titik. Gunakan urungkan untuk
-                    menghapus titik terakhir.
-                  </p>
-                  <Badge className="mt-3 bg-coral text-white">
-                    {(direction === 'A' ? current.pathA : current.pathB).length}{' '}
-                    titik · arah {direction}
-                  </Badge>
+              <div className="grid lg:grid-cols-[minmax(0,1fr)_270px]">
+                <div className="relative h-[460px] min-h-[380px] overflow-hidden lg:h-[560px]">
+                  <MapCanvas
+                    routeData={current}
+                    direction={direction}
+                    editor
+                    onPathChange={updatePath}
+                    focusPoint={focusPoint}
+                  />
+                  <RouteLocationSearch
+                    onFocus={(result) =>
+                      setFocusPoint({
+                        lat: result.lat,
+                        lng: result.lng,
+                        label: result.name,
+                        id: Date.now(),
+                      })
+                    }
+                    onAdd={(result) => {
+                      setFocusPoint({
+                        lat: result.lat,
+                        lng: result.lng,
+                        label: result.name,
+                        id: Date.now(),
+                      });
+                      updatePath([
+                        ...currentPath,
+                        { lat: result.lat, lng: result.lng },
+                      ]);
+                    }}
+                  />
+                  <div className="pointer-events-none absolute bottom-3 left-3 z-20 flex max-w-[calc(100%-1.5rem)] items-center gap-2 rounded-xl bg-white/95 px-3 py-2 shadow-map backdrop-blur">
+                    <MousePointer2 className="size-4 shrink-0 text-coral" />
+                    <p className="text-[11px] font-semibold text-slate-600">
+                      Klik peta untuk tambah titik · Geser titik untuk merapikan
+                    </p>
+                  </div>
                 </div>
+                <aside className="flex min-h-0 flex-col border-t bg-white lg:h-[560px] lg:border-l lg:border-t-0">
+                  <div className="border-b p-4">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-coral">
+                      Arah {direction}
+                    </p>
+                    <h4 className="mt-1 text-sm font-extrabold">
+                      {direction === 'A' ? current.origin : current.destination}{' '}
+                      ke{' '}
+                      {direction === 'A' ? current.destination : current.origin}
+                    </h4>
+                    <div className="mt-3 grid grid-cols-3 gap-1 text-center text-[9px] font-semibold text-slate-400">
+                      <span className="rounded-lg bg-emerald-50 px-1 py-2 text-emerald-700">
+                        1. Klik
+                      </span>
+                      <span className="rounded-lg bg-slate-50 px-1 py-2">
+                        2. Geser
+                      </span>
+                      <span className="rounded-lg bg-slate-50 px-1 py-2">
+                        3. Simpan
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 border-b p-3">
+                    <Button
+                      onClick={() => updatePath(currentPath.slice(0, -1))}
+                      disabled={!currentPath.length || saving}
+                      variant="outline"
+                      size="sm"
+                    >
+                      <Undo2 /> Urungkan
+                    </Button>
+                    <Button
+                      onClick={() => updatePath([])}
+                      disabled={!currentPath.length || saving}
+                      variant="ghost"
+                      size="sm"
+                      className="text-red-600"
+                    >
+                      <Trash2 /> Hapus semua
+                    </Button>
+                    <Button
+                      onClick={() =>
+                        updatePath(
+                          [
+                            ...(direction === 'A'
+                              ? current.pathB
+                              : current.pathA),
+                          ].reverse(),
+                        )
+                      }
+                      disabled={
+                        (direction === 'A' ? current.pathB : current.pathA)
+                          .length < 2 || saving
+                      }
+                      variant="outline"
+                      size="sm"
+                      title={`Salin arah ${reverseDirection}, lalu balik urutannya`}
+                    >
+                      <ArrowLeftRight /> Dari {reverseDirection}
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        const saved =
+                          savedRoutePaths?.[
+                            direction === 'A' ? 'pathA' : 'pathB'
+                          ];
+                        if (saved) updatePath(saved);
+                      }}
+                      disabled={!savedRoutePaths || saving}
+                      variant="ghost"
+                      size="sm"
+                    >
+                      <RotateCcw /> Reset
+                    </Button>
+                  </div>
+                  <div className="min-h-[150px] flex-1 overflow-y-auto p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <b className="text-xs">Urutan titik</b>
+                      <Badge
+                        className={
+                          currentPath.length >= 2
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : 'bg-amber-50 text-amber-700'
+                        }
+                      >
+                        {currentPath.length} titik
+                      </Badge>
+                    </div>
+                    {currentPath.length === 0 ? (
+                      <div className="rounded-xl border border-dashed p-4 text-center">
+                        <MapPin className="mx-auto size-5 text-slate-300" />
+                        <p className="mt-2 text-[11px] text-slate-500">
+                          Klik lokasi awal di peta untuk mulai.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {currentPath.map((point, index) => (
+                          <div
+                            key={`${point.lng}-${point.lat}-${index}`}
+                            className="group flex items-center gap-2 rounded-lg bg-slate-50 p-2"
+                          >
+                            <span
+                              className={`grid size-6 shrink-0 place-items-center rounded-full text-[10px] font-black ${index === 0 || index === currentPath.length - 1 ? 'bg-ink text-white' : 'bg-white text-slate-500'}`}
+                            >
+                              {index === 0 ? (
+                                <Flag className="size-3" />
+                              ) : (
+                                index + 1
+                              )}
+                            </span>
+                            <span className="min-w-0 flex-1 text-[10px] text-slate-500">
+                              <b className="block text-[11px] text-slate-700">
+                                {index === 0
+                                  ? 'Titik awal'
+                                  : index === currentPath.length - 1
+                                    ? 'Titik akhir'
+                                    : `Titik ${index + 1}`}
+                              </b>
+                              {point.lat.toFixed(5)}, {point.lng.toFixed(5)}
+                            </span>
+                            <button
+                              onClick={() =>
+                                updatePath(
+                                  currentPath.filter(
+                                    (_, pointIndex) => pointIndex !== index,
+                                  ),
+                                )
+                              }
+                              className="grid size-6 place-items-center rounded-md text-slate-300 hover:bg-red-50 hover:text-red-600"
+                              aria-label={`Hapus titik ${index + 1}`}
+                            >
+                              <X className="size-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="border-t p-3">
+                    {(current.pathA.length < 2 || current.pathB.length < 2) && (
+                      <p className="mb-2 flex items-start gap-1.5 text-[10px] font-semibold text-amber-700">
+                        <AlertCircle className="mt-0.5 size-3 shrink-0" />
+                        Lengkapi minimal 2 titik pada arah A dan B.
+                      </p>
+                    )}
+                    <Button
+                      onClick={() => void save()}
+                      disabled={
+                        saving ||
+                        !hasUnsavedChanges ||
+                        current.pathA.length < 2 ||
+                        current.pathB.length < 2
+                      }
+                      className="h-10 w-full bg-ink"
+                    >
+                      <Check /> {saving ? 'Menyimpan...' : 'Simpan semua rute'}
+                    </Button>
+                    <p className="mt-2 text-center text-[9px] text-slate-400">
+                      Perubahan baru aktif setelah disimpan.
+                    </p>
+                  </div>
+                </aside>
               </div>
             </>
           )}
@@ -1801,16 +2670,26 @@ function RouteDetailsForm({
       className="grid gap-3"
     >
       {!route && (
+        <div className="rounded-xl bg-emerald-50 p-3 text-[11px] leading-5 text-emerald-800">
+          Isi informasi dasar terlebih dahulu. Setelah trayek dibuat, Anda akan
+          langsung diarahkan untuk menggambar jalur pergi dan pulang di peta.
+        </div>
+      )}
+      {!route && (
         <Field label="Kode trayek">
           <Input name="code" placeholder="Contoh: 05" maxLength={8} required />
         </Field>
       )}
-      <Field label="Nama trayek">
+      <Field label={route ? 'Nama trayek' : 'Nama trayek (opsional)'}>
         <Input
           name="name"
           defaultValue={route?.name ?? ''}
-          placeholder="Cicaheum — Ciroyom"
-          required
+          placeholder={
+            route
+              ? 'Cicaheum — Ciroyom'
+              : 'Dibuat otomatis dari titik awal dan akhir'
+          }
+          required={Boolean(route)}
         />
       </Field>
       <div className="grid grid-cols-2 gap-3">
@@ -2300,8 +3179,14 @@ type CurrentUser = {
   email: string;
   role: 'ADMIN' | 'DRIVER' | 'PASSENGER';
 };
-function LoginScreen({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
-  const [email, setEmail] = useState('penumpang@traslink.id');
+function LoginScreen({
+  onLogin,
+  onBack,
+}: {
+  onLogin: (u: CurrentUser) => void;
+  onBack: () => void;
+}) {
+  const [email, setEmail] = useState('admin@traslink.id');
   const [password, setPassword] = useState('Traslink123!');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -2365,11 +3250,11 @@ function LoginScreen({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
             <Logo />
           </div>
           <p className="text-xs font-bold uppercase tracking-widest text-coral">
-            Selamat datang
+            Area terbatas
           </p>
-          <h2 className="mt-2 text-3xl font-black">Masuk ke Traslink</h2>
+          <h2 className="mt-2 text-3xl font-black">Dashboard Operasional</h2>
           <p className="mt-2 text-sm text-slate-500">
-            Gunakan akun sesuai peran Anda.
+            Masuk menggunakan akun administrator atau sopir Traslink.
           </p>
           <div className="mt-8 grid gap-4">
             <Field label="Email">
@@ -2395,13 +3280,16 @@ function LoginScreen({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
               </p>
             )}
             <Button type="submit" disabled={loading} className="h-11 bg-coral">
-              {loading ? 'Memeriksa...' : 'Masuk'}
+              {loading ? 'Memeriksa...' : 'Masuk ke dashboard'}
+            </Button>
+            <Button type="button" onClick={onBack} variant="ghost">
+              <MapIcon /> Kembali ke peta penumpang
             </Button>
           </div>
           <div className="mt-6 rounded-xl bg-slate-50 p-3 text-[11px] text-slate-500">
-            <b>Akun demo setelah seed:</b>
+            <b>Akun awal setelah seed:</b>
             <br />
-            admin@traslink.id · supir@traslink.id · penumpang@traslink.id
+            admin@traslink.id / supir@traslink.id
             <br />
             Kata sandi: Traslink123!
           </div>
@@ -2414,6 +3302,7 @@ function LoginScreen({ onLogin }: { onLogin: (u: CurrentUser) => void }) {
 export default function Home() {
   const [user, setUser] = useState<CurrentUser | null | undefined>(undefined);
   const [view, setView] = useState<View>('passenger');
+  const [showAdminLogin, setShowAdminLogin] = useState(false);
   useEffect(() => {
     fetch('/api/auth/me')
       .then((r) => r.json())
@@ -2439,24 +3328,29 @@ export default function Home() {
         </div>
       </main>
     );
-  if (!user)
+  if (!user && showAdminLogin)
     return (
       <LoginScreen
+        onBack={() => setShowAdminLogin(false)}
         onLogin={(u) => {
           setUser(u);
-          setView(
-            u.role === 'ADMIN'
-              ? 'admin'
-              : u.role === 'DRIVER'
-                ? 'driver'
-                : 'passenger',
-          );
+          setShowAdminLogin(false);
+          setView(u.role === 'DRIVER' ? 'driver' : 'admin');
         }}
+      />
+    );
+  if (!user)
+    return (
+      <PassengerView
+        setView={() => {}}
+        allowedViews={['passenger']}
+        authenticated={false}
+        onAdminLogin={() => setShowAdminLogin(true)}
       />
     );
   const allowedViews: View[] =
     user.role === 'ADMIN'
-      ? ['admin', 'driver', 'passenger']
+      ? ['admin', 'passenger']
       : user.role === 'DRIVER'
         ? ['driver', 'passenger']
         : ['passenger'];
@@ -2466,5 +3360,11 @@ export default function Home() {
   if (view === 'driver')
     return <DriverView setView={changeView} allowedViews={allowedViews} />;
   if (view === 'admin') return <AdminView setView={changeView} user={user} />;
-  return <PassengerView setView={changeView} allowedViews={allowedViews} />;
+  return (
+    <PassengerView
+      setView={changeView}
+      allowedViews={allowedViews}
+      authenticated
+    />
+  );
 }

@@ -34,11 +34,19 @@ export async function GET() {
       .leftJoin(gpsDevices, eq(vehicles.gpsDeviceId, gpsDevices.id))
       .leftJoin(vehiclePositions, eq(vehiclePositions.vehicleId, vehicles.id))
       .orderBy(desc(vehiclePositions.recordedAt));
-    return NextResponse.json({
-      vehicles: list.filter(
-        (v, i, a) => a.findIndex((x) => x.id === v.id) === i,
-      ),
-    });
+    return NextResponse.json(
+      {
+        vehicles: list
+          .filter((v, i, a) => a.findIndex((x) => x.id === v.id) === i)
+          .map((vehicle) => ({
+            ...vehicle,
+            locationFresh: vehicle.recordedAt
+              ? Date.now() - vehicle.recordedAt.getTime() <= 2 * 60_000
+              : false,
+          })),
+      },
+      { headers: { 'Cache-Control': 'no-store, max-age=0' } },
+    );
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Gagal memuat armada' },

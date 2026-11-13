@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '@/lib/db';
 import { stops, transitRoutes, vehicles } from '@/db/schema';
@@ -26,31 +26,30 @@ const routeInput = z.object({
 });
 export async function GET() {
   try {
-    return NextResponse.json({
-      routes: await db()
-        .select({
-          id: transitRoutes.id,
-          code: transitRoutes.code,
-          name: transitRoutes.name,
-          origin: transitRoutes.origin,
-          destination: transitRoutes.destination,
-          via: transitRoutes.via,
-          color: transitRoutes.color,
-          operatingStart: transitRoutes.operatingStart,
-          operatingEnd: transitRoutes.operatingEnd,
-          fare: transitRoutes.fare,
-          pathA: transitRoutes.pathA,
-          pathB: transitRoutes.pathB,
-          active: transitRoutes.active,
-          createdAt: transitRoutes.createdAt,
-          updatedAt: transitRoutes.updatedAt,
-          stops: sql<number>`(select count(*)::int from ${stops} where ${stops.routeId} = ${transitRoutes.id})`,
-          fleet: sql<number>`(select count(*)::int from ${vehicles} where ${vehicles.routeId} = ${transitRoutes.id})`,
-          activeVehicles: sql<number>`(select count(*)::int from ${vehicles} where ${vehicles.routeId} = ${transitRoutes.id} and ${vehicles.status} = 'ACTIVE')`,
-        })
-        .from(transitRoutes)
-        .where(eq(transitRoutes.active, true)),
+    const [routeRows, vehicleRows, stopRows] = await Promise.all([
+      db().select().from(transitRoutes).where(eq(transitRoutes.active, true)),
+      db()
+        .select({ routeId: vehicles.routeId, status: vehicles.status })
+        .from(vehicles),
+      db().select({ routeId: stops.routeId }).from(stops),
+    ]);
+    const routes = routeRows.map((route) => {
+      const routeVehicles = vehicleRows.filter(
+        (vehicle) => vehicle.routeId === route.id,
+      );
+      return {
+        ...route,
+        stops: stopRows.filter((stop) => stop.routeId === route.id).length,
+        fleet: routeVehicles.length,
+        activeVehicles: routeVehicles.filter(
+          (vehicle) => vehicle.status === 'ACTIVE',
+        ).length,
+      };
     });
+    return NextResponse.json(
+      { routes },
+      { headers: { 'Cache-Control': 'no-store, max-age=0' } },
+    );
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Gagal memuat trayek' },
